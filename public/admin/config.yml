@@ -5,7 +5,7 @@ backend:
   branch: main
   base_url: https://familiehuizinga.nl
   # Optioneel: als je een externe gatekeeper gebruikt voor inloggen:
-  # auth_endpoint: api/auth 
+  auth_endpoint: api/index.php
 
 # Lokale backend voor testen op je laptop
 local_backend: true
