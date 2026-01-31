@@ -1,0 +1,12 @@
+# Robots.txt voor Huizinga Stamboom
+User-agent: *
+Allow: /
+Allow: /personen/
+Allow: /images/
+
+# Voorkom indexering van de zoekresultaten-pagina's om 'duplicate content' te vermijden
+Disallow: /search
+Disallow: /api/
+
+# Verwijs naar de sitemap die we in de console zagen gegenereerd worden
+Sitemap: https://familiehuizinga.nl/sitemap.xml
