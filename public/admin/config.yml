@@ -1,11 +1,20 @@
-local_backend: true
+# Backend instellingen voor GitHub
 backend:
-  name: git-gateway
+  name: github
+  repo: drkhuizinga-max/stamboom-huizinga
   branch: main
+  base_url: https://familiehuizinga.nl
+  # Optioneel: als je een externe gatekeeper gebruikt voor inloggen:
+  # auth_endpoint: api/auth 
 
+# Lokale backend voor testen op je laptop
+local_backend: true
+
+# Media instellingen
 media_folder: "public/images"
 public_folder: "/images"
 
+# De collecties (je data mappen)
 collections:
   - name: "personen"
     label: "Stamboom Personen"
@@ -29,6 +38,5 @@ collections:
       - { label: "Moeder ID", name: "moeder_id", widget: "string", required: false }
       - { label: "Partner ID", name: "partner_id", widget: "string", required: false }
       - { label: "Foto URL", name: "foto_url", widget: "image", required: false }
-      # We houden het even simpel om de crash op te lossen:
       - { label: "Scans", name: "scans", widget: "string", required: false }
       - { label: "Notities", name: "notities", widget: "text", required: false }
