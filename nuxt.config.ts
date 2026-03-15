@@ -1,54 +1,62 @@
-import { readdirSync } from 'fs'
-import { resolve } from 'path'
-
-// Haal de lijst met bestandsnamen op uit je content map
-const getPersonenRoutes = () => {
-  const contentDir = resolve(__dirname, 'content/personen')
-  try {
-    const files = readdirSync(contentDir)
-    // Maak van '1-albert.json' -> '/personen/1-albert'
-    return files
-      .filter(file => file.endsWith('.json'))
-      .map(file => `/personen/${file.replace('.json', '')}`)
-  } catch (e) {
-    return []
-  }
-}
-
 export default defineNuxtConfig({
-  devtools: { enabled: false },
+  // SPA-mode voor maximale compatibiliteit met je PHP API
+  ssr: false,
+
+  compatibilityDate: '2024-11-01',
 
   modules: [
-    '@nuxt/content',
-    '@nuxtjs/sitemap'
+    '@nuxt/content'
   ],
 
-  site: {
-    url: 'https://jouwdomein.nl', 
-    name: 'Huizinga Genealogie'
+  app: {
+    baseURL: '/', 
+    buildAssetsDir: '_nuxt', 
+    head: {
+      title: 'Huizinga Genealogie',
+      htmlAttrs: { lang: 'nl' },
+      link: [
+        { 
+          rel: 'stylesheet', 
+          href: 'https://fonts.googleapis.com/css2?family=Jost:ital,wght@0,100..900;1,100..900&family=Onest:wght@100..900&display=swap' 
+        }
+      ]
+    }
   },
 
-  // Dwing de prerenderer om ELK bestand te verwerken
+  content: {
+    documentDriven: false,
+    markdown: { anchorLinks: false }
+  },
+
   nitro: {
     prerender: {
-      crawlLinks: false, // We geven de lijst zelf wel, scheelt geheugen
+      crawlLinks: false, 
       routes: [
         '/',
-        '/sitemap.xml',
-        ...getPersonenRoutes() // Hier laden we de 2629 routes in
-      ],
-      concurrency: 1, // Houd het veilig voor je RAM
-      failOnError: false
+        '/familie/huizinga',
+        '/familie/waterbolk',
+        '/geschiedenis/houwerzijl',
+        '/geschiedenis/hogeland'
+      ]
     }
   },
 
   routeRules: {
-    '/personen/**': { prerender: true }
+    '/personen/**': { ssr: false }
   },
 
-  sitemap: {
-    strictNuxtContentAds: true
+  typescript: { 
+    typeCheck: false, 
+    strict: false 
   },
 
-  compatibilityDate: '2024-04-03'
+  devtools: { 
+    enabled: true 
+  },
+  
+  experimental: { 
+    appManifest: false,
+    payloadExtraction: false, 
+    renderJsonPayloads: false  
+  }
 })

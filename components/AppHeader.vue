@@ -15,8 +15,9 @@
           <div class="dropdown">
             <NuxtLink to="/geschiedenis/houwerzijl">Houwerzijl</NuxtLink>
             <NuxtLink to="/geschiedenis/hogeland">Het Hogeland</NuxtLink>
-            <NuxtLink to="/geschiedenis/kaart">Interactieve Kaart</NuxtLink>
-            <NuxtLink to="/geschiedenis/tijdlijn">Tijdlijn</NuxtLink>
+            <NuxtLink to="/geschiedenis/kaart">Kaart 1834</NuxtLink>
+            <NuxtLink to="/familie/huizinga">Familie Huizinga</NuxtLink>
+            <NuxtLink to="/familie/waterbolk">Familie Waterbolk</NuxtLink>
           </div>
         </div>
 
@@ -67,7 +68,7 @@
   color: white;
   text-decoration: none;
   text-transform: uppercase;
-  font-size: 0.8rem;
+  font-size: 1.0rem;
   font-weight: bold;
   letter-spacing: 1px;
   cursor: pointer;
@@ -114,5 +115,18 @@
 @media (max-width: 950px) {
   .nav-container { flex-direction: column; }
   .nav-links { gap: 10px; flex-wrap: wrap; justify-content: center; }
+}
+
+.nav-label {
+  font-family: 'Jost', sans-serif;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.dropdown a {
+  font-family: 'Onest', sans-serif;
+  font-weight: 400;
+  font-size: 0.95rem;
 }
 </style>

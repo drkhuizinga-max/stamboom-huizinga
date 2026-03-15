@@ -1,194 +1,496 @@
 <script setup>
 const route = useRoute()
+const persoon = ref(null)
+const vader = ref(null)
+const moeder = ref(null)
+const grootouders = ref({ vv: null, vm: null, mv: null, mm: null })
+const partner = ref(null)
+const kinderen = ref([])
+const loading = ref(true)
+const error = ref(null)
 
-// 1. Data fetching
-const { data: allePersonen } = await useAsyncData('stamboom-cache', () => queryContent().find())
-const { data: persoon } = await useAsyncData(`p-${route.path}`, () => queryContent().where({ _path: route.path }).findOne())
-
-// 2. SEO
-useHead({
-  title: () => persoon.value?.naam ? `${persoon.value.naam} - Huizinga Genealogie` : 'Laden...',
-  meta: [{ name: 'description', content: () => persoon.value?.naam ? `Stamboom van ${persoon.value.naam}` : 'Huizinga' }]
-})
-
-// 3. Zoeklogica
+const activeScan = ref(null)
+const isZoomed = ref(false)
 const searchQuery = ref('')
-const zoekResultaten = computed(() => {
-  const q = searchQuery.value.toLowerCase().trim()
-  if (q.length < 2 || !allePersonen.value) return []
-  return allePersonen.value.filter(p => p.naam?.toLowerCase().includes(q)).slice(0, 10)
-})
+const searchResults = ref([])
+const API = 'https://familiehuizinga.nl/api'
 
-// 4. Helpers & Relaties
-const getYear = (d) => d ? (d.match(/\d{4}/) || [''])[0] : ''
-const getP = (id) => id && allePersonen.value ? allePersonen.value.find(p => String(p.id) === String(id)) : null
-const getImageUrl = (path) => path ? `/${path.replace(/^\//, '')}` : null
+// --- HELPERS ---
+const getImageUrl = (path) => {
+  if (!path || path === '0' || path === '' || typeof path !== 'string' || path.includes('null')) return null;
+  
+  // Verwijder eventuele schuine strepen aan het begin
+  const cleanPath = path.trim().replace(/^\//, '');
+  
+  // Als het al een volledige URL is, gebruik die. 
+  // Anders: plak het pad naar de nieuwe upload-map er tussen.
+  return path.startsWith('http') ? path : `https://familiehuizinga.nl/api/uploads/${cleanPath}`;
+}
 
-const vader = computed(() => getP(persoon.value?.vader_id))
-const moeder = computed(() => getP(persoon.value?.moeder_id))
-const partner = computed(() => getP(persoon.value?.partner_id))
-const opaV = computed(() => getP(vader.value?.vader_id))
-const omaV = computed(() => getP(vader.value?.moeder_id))
-const opaM = computed(() => getP(moeder.value?.vader_id))
-const omaM = computed(() => getP(moeder.value?.moeder_id))
+const createSlug = (name) => {
+  if (!name) return 'persoon';
+  return name.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '');
+}
 
-const kinderen = computed(() => {
-  if (!persoon.value || !allePersonen.value) return []
-  const myId = String(persoon.value.id)
-  return allePersonen.value.filter(p => String(p.vader_id) === myId || String(p.moeder_id) === myId)
-})
+const getFullSlug = (p) => {
+  if (!p || !p.id || !p.naam) return '#';
+  return `${p.id}-${createSlug(p.naam)}`;
+}
 
-const scanLijst = computed(() => persoon.value?.scans ? persoon.value.scans.split(',').map(s => s.trim()) : [])
+const getYearsString = (p) => {
+  if (!p) return '';
+  const birth = p.geboortedatum || p.geb_datum || p.geboortejaar || '';
+  const death = p.overlijdensdatum || p.ovl_datum || '';
+  const bMatch = birth.toString().match(/\d{4}/);
+  const dMatch = death.toString().match(/\d{4}/);
+  const bYear = bMatch ? bMatch[0] : '';
+  const dYear = dMatch ? dMatch[0] : '';
+  if (bYear && dYear) return `(${bYear}-${dYear})`;
+  if (bYear) return `(*${bYear})`;
+  return '';
+}
+
+const formatNotities = (txt) => {
+  if (!txt) return '';
+  if (txt.includes('<p>') || txt.includes('<br>')) return txt;
+  return txt.trim().split(/\n\s*\n/).map(para => `<p>${para.replace(/\n/g, `<br>`)}</p>`).join('');
+}
+
+const fetchSafe = async (url) => {
+  try {
+    const r = await fetch(url, { cache: 'no-cache' });
+    if (!r.ok) return null;
+    const text = await r.text();
+    // Als de response geen JSON is, behandelen we het als platte tekst (Markdown)
+    if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+      return { isContent: true, content: text };
+    }
+    return JSON.parse(text);
+  } catch (err) { return null; }
+}
+
+const handleSearch = async () => {
+  if (searchQuery.value.length < 2) { searchResults.value = []; return; }
+  const res = await fetchSafe(`${API}/data.php?search=${encodeURIComponent(searchQuery.value)}`);
+  if (res && Array.isArray(res)) searchResults.value = res;
+}
+
+const laadData = async () => {
+  const s = route.params.slug;
+  if (!s) return;
+  const lastPart = Array.isArray(s) ? s[s.length - 1] : s;
+
+  loading.value = true;
+  error.value = null;
+  persoon.value = null; 
+  vader.value = moeder.value = partner.value = null;
+  kinderen.value = [];
+  grootouders.value = { vv: null, vm: null, mv: null, mm: null };
+
+  // Check of het een thema-pagina is (geen ID aan het begin)
+  if (!/^\d/.test(lastPart)) {
+    const res = await fetchSafe(`${API}/data.php?slug=${lastPart}`);
+    if (res) {
+      persoon.value = { 
+        // Geef voorkeur aan de naam/titel uit de API (Markdown frontmatter)
+        naam: res.naam || res.title || lastPart.replace('.md', '').toUpperCase().replace(/-/g, ' '), 
+        subtitle: res.subtitle || '',
+        notities: res.isContent ? res.content : res.notities,
+        isThema: true 
+      };
+    }
+    loading.value = false;
+    return;
+  }
+
+  // Database persoon inladen
+  const id = parseInt(lastPart.split('-')[0]);
+  try {
+    const data = await fetchSafe(`${API}/data.php?slug=${id}`);
+    if (!data) { error.value = "Persoon niet gevonden."; loading.value = false; return; }
+    
+    // Zorg dat plaatsen expliciet in het object zitten
+    persoon.value = data;
+
+    const familiePromises = [];
+    
+    // Partner ophalen
+    if (data.partner_id && data.partner_id !== "0") {
+      familiePromises.push(fetchSafe(`${API}/data.php?slug=${data.partner_id}`).then(res => partner.value = res));
+    }
+    
+    // Kinderen ophalen
+    familiePromises.push(fetchSafe(`${API}/data.php?children_of=${id}`).then(res => { if (res) kinderen.value = res; }));
+    
+    // Voorouders ophalen
+    if (data.vader_id && data.vader_id !== "0") {
+      familiePromises.push(fetchSafe(`${API}/data.php?slug=${data.vader_id}`).then(async v => {
+        vader.value = v;
+        if (v?.vader_id > 0) grootouders.value.vv = await fetchSafe(`${API}/data.php?slug=${v.vader_id}`);
+        if (v?.moeder_id > 0) grootouders.value.vm = await fetchSafe(`${API}/data.php?slug=${v.moeder_id}`);
+      }));
+    }
+    if (data.moeder_id && data.moeder_id !== "0") {
+      familiePromises.push(fetchSafe(`${API}/data.php?slug=${data.moeder_id}`).then(async m => {
+        moeder.value = m;
+        if (m?.vader_id > 0) grootouders.value.mv = await fetchSafe(`${API}/data.php?slug=${m.vader_id}`);
+        if (m?.moeder_id > 0) grootouders.value.mm = await fetchSafe(`${API}/data.php?slug=${m.moeder_id}`);
+      }));
+    }
+    await Promise.all(familiePromises);
+  } catch (e) { console.error(e); }
+  loading.value = false;
+}
+
+onMounted(laadData);
+watch(() => route.params.slug, laadData);
 </script>
 
 <template>
-  <div class="stamboom-app">
+  <div class="layout-container">
     <aside class="sidebar">
-      <div class="sidebar-top">
-        <h1 class="sidebar-logo">Huizinga<span>STAMBOOM</span></h1>
-        <div class="search-container">
-          <p class="search-title">ZOEK EEN VOOROUDER...</p>
-          <div class="search-wrapper">
-            <input v-model="searchQuery" type="text" placeholder="Typ naam..." class="sidebar-input" />
-            <span class="search-icon">🔍</span>
-            <div v-if="zoekResultaten.length" class="search-results">
-              <NuxtLink v-for="res in zoekResultaten" :key="res._path" :to="res._path" class="result-link" @click="searchQuery = ''">
-                <div class="result-name">{{ res.naam }}</div>
-                <div class="result-meta">{{ getYear(res.geboortedatum) }}</div>
-              </NuxtLink>
-            </div>
+      <div class="sticky-nav">
+        <h3 class="side-title">Zoeken</h3>
+        <div class="search-box" style="position: relative;">
+          <input v-model="searchQuery" @input="handleSearch" type="text" placeholder="Naam..." class="search-input" />
+          <div v-if="searchResults.length" class="search-results">
+            <NuxtLink v-for="s in searchResults" :key="s.id" :to="`/personen/${getFullSlug(s)}`" class="search-item" @click="searchQuery = ''">
+              <span class="search-name">{{ s.naam }}</span>
+              <span class="search-years" v-if="getYearsString(s)">{{ getYearsString(s) }}</span>
+            </NuxtLink>
           </div>
         </div>
-        <NuxtLink to="/stamboom" class="back-link">← Terug naar lijst</NuxtLink>
       </div>
     </aside>
 
-    <main class="main-content" v-if="persoon">
-      <div class="tree-container">
-        <div class="tree-level">
-          <div class="nodes-row">
-            <NuxtLink v-if="opaV" :to="opaV._path" class="node small">
-              <span class="node-label">GROOTVADER</span>
-              <span class="node-name">{{ opaV.naam }}</span>
-              <span class="node-year">{{ getYear(opaV.geboortedatum) }}</span>
+    <main class="main-content">
+      <div v-if="loading" class="loading-state">Laden...</div>
+      <div v-else-if="error" class="error-state">{{ error }}</div>
+      <div v-else-if="persoon" class="profile-view">
+        
+        <div v-if="!persoon.isThema" class="tree-section">
+          <div class="tree-row">
+            <NuxtLink v-for="g in [grootouders.vv, grootouders.vm, grootouders.mv, grootouders.mm]" :key="g?.id" :to="`/personen/${getFullSlug(g)}`" class="node-link small" :class="{ empty: !g }">
+              {{ g?.naam || '...' }} <span v-if="getYearsString(g)" class="node-year">{{ getYearsString(g) }}</span>
             </NuxtLink>
-            <NuxtLink v-if="omaV" :to="omaV._path" class="node small">
-              <span class="node-label">GROOTMOEDER</span>
-              <span class="node-name">{{ omaV.naam }}</span>
-              <span class="node-year">{{ getYear(omaV.geboortedatum) }}</span>
+          </div>
+          <div class="tree-row">
+            <NuxtLink :to="`/personen/${getFullSlug(vader)}`" class="node-link gold" :class="{ empty: !vader }">
+              <span class="label">Vader</span> {{ vader?.naam || 'Onbekend' }} <span v-if="getYearsString(vader)" class="node-year">{{ getYearsString(vader) }}</span>
             </NuxtLink>
-            <NuxtLink v-if="opaM" :to="opaM._path" class="node small">
-              <span class="node-label">GROOTVADER</span>
-              <span class="node-name">{{ opaM.naam }}</span>
-              <span class="node-year">{{ getYear(opaM.geboortedatum) }}</span>
-            </NuxtLink>
-            <NuxtLink v-if="omaM" :to="omaM._path" class="node small">
-              <span class="node-label">GROOTMOEDER</span>
-              <span class="node-name">{{ omaM.naam }}</span>
-              <span class="node-year">{{ getYear(omaM.geboortedatum) }}</span>
+            <NuxtLink :to="`/personen/${getFullSlug(moeder)}`" class="node-link gold" :class="{ empty: !moeder }">
+              <span class="label">Moeder</span> {{ moeder?.naam || 'Onbekend' }} <span v-if="getYearsString(moeder)" class="node-year">{{ getYearsString(moeder) }}</span>
             </NuxtLink>
           </div>
         </div>
 
-        <div class="tree-level">
-          <div class="nodes-row">
-            <NuxtLink v-if="vader" :to="vader._path" class="node">
-              <span class="node-label">VADER</span>
-              <span class="node-name">{{ vader.naam }}</span>
-              <span class="node-year">{{ getYear(vader.geboortedatum) }}</span>
-            </NuxtLink>
-            <NuxtLink v-if="moeder" :to="moeder._path" class="node">
-              <span class="node-label">MOEDER</span>
-              <span class="node-name">{{ moeder.naam }}</span>
-              <span class="node-year">{{ getYear(moeder.geboortedatum) }}</span>
-            </NuxtLink>
+        <div v-if="getImageUrl(persoon.foto_url)" class="portrait-frame">
+          <img :src="getImageUrl(persoon.foto_url)" class="portrait-img" alt="Portret" />
+        </div>
+
+        <h1 class="p-name">{{ persoon.naam }}</h1>
+        <p v-if="persoon.subtitle" class="p-subtitle">{{ persoon.subtitle }}</p>
+
+        <div v-if="!persoon.isThema && (persoon.geboortedatum || persoon.overlijdensdatum)" class="vital-details">
+          <div v-if="persoon.geboortedatum" class="vital-item">
+            <span class="label">GEBOORTE</span>
+            <span class="date">{{ persoon.geboortedatum }}</span>
+            <span class="place">{{ persoon.geboorteplaats }}</span>
+          </div>
+          <div v-if="persoon.overlijdensdatum" class="vital-item">
+            <span class="label">OVERLIJDEN</span>
+            <span class="date">{{ persoon.overlijdensdatum }}</span>
+            <span class="place">{{ persoon.overlijdensplaats }}</span>
           </div>
         </div>
 
-        <section class="focus-box">
-          <img v-if="persoon.foto_url" :src="getImageUrl(persoon.foto_url)" class="focus-portrait" />
-          <h2 class="focus-name">{{ persoon.naam }}</h2>
-          <div class="focus-details">
-            <p class="focus-dates">{{ persoon.geboortedatum }} — {{ persoon.overlijdensdatum || 'heden' }}</p>
-            <p class="focus-location" v-if="persoon.geboorteplaats || persoon.overlijdensplaats">
-              <span v-if="persoon.geboorteplaats">Geboren te {{ persoon.geboorteplaats }}</span>
-              <span v-if="persoon.overlijdensplaats"> — Overleden te {{ persoon.overlijdensplaats }}</span>
-            </p>
+        <div v-if="!persoon.isThema" class="family-section">
+          <div v-if="partner" class="partner-container">
+            <span class="section-label">ECHTGENOOT / PARTNER</span>
+            <div class="partner-wrapper">
+              <NuxtLink :to="`/personen/${getFullSlug(partner)}`" class="fam-card partner-card">
+                <span class="fam-name">{{ partner.naam }}</span>
+                <span class="card-year">{{ getYearsString(partner) }}</span>
+              </NuxtLink>
+            </div>
           </div>
-        </section>
 
-        <div class="tree-level bottom-info">
-          <div v-if="partner" class="relation-group">
-            <p class="group-title">ECHTGENOOT / PARTNER</p>
-            <NuxtLink :to="partner._path" class="node partner">
-              {{ partner.naam }} ({{ getYear(partner.geboortedatum) }})
-            </NuxtLink>
-          </div>
-          <div v-if="kinderen.length" class="relation-group">
-            <p class="group-title">KINDEREN</p>
-            <div class="children-grid">
-              <NuxtLink v-for="k in kinderen" :key="k.id" :to="k._path" class="node child">
-                {{ k.naam }} <span class="y">{{ getYear(k.geboortedatum) }}</span>
+          <div v-if="kinderen.length" class="kids-section">
+            <span class="section-label">KINDEREN</span>
+            <div class="kids-grid">
+              <NuxtLink v-for="k in kinderen" :key="k.id" :to="`/personen/${getFullSlug(k)}`" class="fam-card">
+                <span class="fam-name">{{ k.naam }}</span>
+                <span class="card-year">{{ getYearsString(k) }}</span>
               </NuxtLink>
             </div>
           </div>
         </div>
-      </div>
 
-      <section class="content-body biography-section" v-if="persoon.notities">
-        <h3 class="section-title">Biografie</h3>
-        <div class="biography-text">{{ persoon.notities }}</div>
-      </section>
+        <hr v-if="!persoon.isThema" class="divider" />
 
-      <section class="content-body documents-section" v-if="scanLijst.length">
-        <h3 class="section-title">Documenten & Scans</h3>
-        <div class="scans-grid">
-          <a v-for="s in scanLijst" :key="s" :href="'/' + s" target="_blank" class="scan-thumb">
-            <img :src="'/' + s" />
-          </a>
+        <div class="text-block">
+          <h3 v-if="!persoon.isThema" class="section-title">Informatie</h3>
+          <div class="bio-content" v-html="formatNotities(persoon.notities)"></div>
         </div>
-      </section>
+
+        <div v-if="persoon.scans" class="text-block">
+          <h3 class="section-title">Documenten</h3>
+          <div class="scans-grid">
+            <div v-for="(scan, index) in persoon.scans.split(',')" :key="index" @click="activeScan = getImageUrl(scan.trim())" class="scan-wrapper">
+              <img :src="getImageUrl(scan.trim())" />
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <div v-if="activeScan" class="lightbox-overlay" @click="activeScan = null">
+      <button class="close-x" @click="activeScan = null">&times;</button>
+      <div class="lightbox-canvas">
+        <img 
+          :src="activeScan" 
+          :class="isZoomed ? 'img-full' : 'img-fit'" 
+          @click.stop="isZoomed = !isZoomed" 
+        />
+      </div>
+      <div class="lightbox-footer">
+        <button @click.stop="isZoomed = !isZoomed">
+          {{ isZoomed ? 'Uitzoomen' : 'Inzoomen' }}
+        </button>
+        <button @click="activeScan = null">Sluiten</button>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.stamboom-app { display: flex; min-height: 100vh; background: #fdfcf9; font-family: 'Libre Baskerville', serif; }
+/* --- Zoekresultaten Fix --- */
+.search-results {
+  background: #fff;
+  border: 1px solid #dcd7ca;
+  position: absolute;
+  width: 100%; 
+  max-height: 400px;
+  overflow-y: auto;
+  z-index: 1000;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+  margin-top: 4px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
 
-/* Sidebar */
-.sidebar { width: 260px; background: #fff; padding: 40px 20px; border-right: 1px solid #eee; position: sticky; top: 0; height: 100vh; }
-.sidebar-logo { font-size: 1.2rem; margin-bottom: 30px; font-weight: bold; }
-.sidebar-logo span { display: block; color: #cfa84e; font-size: 0.7rem; letter-spacing: 2px; }
-.search-wrapper { position: relative; }
-.sidebar-input { width: 100%; padding: 10px; border: 1px solid #333; border-radius: 4px; font-size: 0.85rem; }
-.search-icon { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #999; }
-.search-results { position: absolute; top: 100%; left: 0; right: -40px; background: white; border: 1px solid #cfa84e; z-index: 1000; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
-.result-link { display: block; padding: 12px; border-bottom: 1px solid #eee; text-decoration: none; color: #333; }
+.search-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 15px;
+  text-decoration: none;
+  color: #1a2a3a;
+  border-bottom: 1px solid #f0ede6;
+  font-size: 0.9rem;
+}
 
-/* Boom Layout */
-.main-content { flex: 1; padding: 60px; display: flex; flex-direction: column; align-items: center; }
-.tree-container { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 40px; }
-.nodes-row { display: flex; justify-content: center; gap: 15px; flex-wrap: wrap; }
-.node { background: #fff; border: 1px solid #e2e2d9; padding: 10px 15px; text-decoration: none; color: #1a2a3a; min-width: 170px; text-align: center; border-radius: 4px; display: flex; flex-direction: column; }
-.node-label { font-size: 0.6rem; color: #cfa84e; font-weight: bold; letter-spacing: 1px; margin-bottom: 4px; }
+.search-item:hover { background: #fdfcf9; color: #cfa84e; }
+.search-name { font-weight: 500; }
+.search-years { color: #8b7355; font-size: 0.8rem; }
 
-/* Focus sectie styling */
-.focus-box { text-align: center; padding: 10px 0; }
-.focus-portrait { width: 190px; border: 6px solid #fff; box-shadow: 0 10px 25px rgba(0,0,0,0.08); margin-bottom: 15px; }
-.focus-name { font-size: 2.3rem; color: #1a2a3a; margin-bottom: 5px; }
-.focus-dates { color: #cfa84e; font-weight: bold; font-size: 1.1rem; margin-bottom: 5px; }
-.focus-location { font-size: 0.9rem; color: #666; font-style: italic; }
+/* --- Algemene Layout --- */
+.layout-container { 
+  display: flex; background: #fdfcf9; min-height: 100vh; max-width: 100%; overflow-x: hidden; 
+  font-family: 'Onest', sans-serif; color: #1a2a3a; 
+}
 
-/* Biografie & Scans */
-.content-body { width: 100%; max-width: 900px; margin-top: 50px; border-top: 1px solid #eee; padding-top: 30px; }
-.section-title { font-size: 1.1rem; color: #1a2a3a; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 25px; text-align: center; font-weight: bold; }
-.biography-text { column-count: 2; column-gap: 40px; text-align: justify; line-height: 1.8; color: #444; white-space: pre-line; font-size: 0.95rem; }
-.scans-grid { display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; }
-.scan-thumb img { width: 140px; height: 190px; object-fit: cover; border: 1px solid #ddd; }
+.sidebar { width: 280px; padding: 40px 20px; background: #fff; border-right: 1px solid #e0ddd5; flex-shrink: 0; }
+.search-input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
 
-.group-title { font-size: 0.7rem; color: #cfa84e; font-weight: bold; letter-spacing: 2px; margin-bottom: 15px; text-align: center; }
-.children-grid { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-.back-link { font-size: 0.85rem; color: #8a6d3b; text-decoration: underline; margin-top: 20px; display: inline-block; }
+.main-content { flex: 1; padding: 40px; min-width: 0; width: 100%; box-sizing: border-box; }
+.profile-view { max-width: 950px; margin: 0 auto; text-align: center; }
 
-@media (max-width: 1100px) { .biography-text { column-count: 1; } }
+/* --- Stamboom Boomstructuur --- */
+.tree-row { display: flex; justify-content: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; width: 100%; }
+.node-link { 
+  background: #fff; border: 1px solid #e0ddd5; padding: 10px; text-decoration: none; color: inherit; 
+  min-width: 140px; font-size: 0.8rem; box-sizing: border-box; border-radius: 4px;
+  transition: all 0.2s ease;
+}
+.node-link:hover { border-color: #cfa84e; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+.node-link.gold { border-color: #cfa84e; border-width: 2px; font-weight: bold; background: #fffcf5; }
+.node-year { color: #8b7355; font-size: 0.75rem; display: block; margin-top: 2px; }
+
+/* --- Portret & Namen --- */
+.portrait-frame { width: 220px; height: 280px; margin: 20px auto; border: 1px solid #eee; background: #fff; display: flex; align-items: center; justify-content: center; }
+.portrait-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.p-name { font-size: 2.2rem; font-family: 'Playfair Display', serif; margin: 15px 0; }
+.p-subtitle { color: #8b7355; font-style: italic; margin-top: -10px; margin-bottom: 30px; font-size: 1.1rem; }
+
+/* --- Vital Details (Geboorte/Overlijden) --- */
+.vital-details { 
+  display: flex; 
+  justify-content: center; 
+  gap: 60px; 
+  margin: 25px 0; 
+  border-top: 1px solid #eee; 
+  border-bottom: 1px solid #eee; 
+  padding: 20px 0; 
+}
+
+.vital-item { 
+  display: flex; 
+  flex-direction: column; 
+  align-items: center; 
+  min-width: 180px; 
+}
+
+.vital-item .label { 
+  font-size: 0.7rem; 
+  color: #888; 
+  margin-bottom: 4px; 
+  text-transform: uppercase; 
+  letter-spacing: 1px; 
+}
+
+.vital-item .date { 
+  font-weight: 600; 
+  font-size: 1.05rem; 
+  color: #1a2a3a; 
+}
+
+/* Toegevoegde styling voor de plaatsnaam */
+.vital-item .place { 
+  font-size: 0.95rem; 
+  color: #1a2a3a; 
+  margin-top: 2px; 
+  font-weight: 400; 
+}
+
+/* --- Familie Sectie (Partner & Kinderen) --- */
+.family-section { margin: 50px auto; max-width: 850px; display: flex; flex-direction: column; gap: 40px; }
+.section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 1.5px; color: #8b7355; margin-bottom: 20px; text-transform: uppercase; display: block; }
+
+.fam-card { 
+  background: #fff; border: 1px solid #e0ddd5; padding: 16px; text-decoration: none; color: inherit; 
+  display: flex; flex-direction: column; align-items: center; border-radius: 8px;
+  transition: all 0.3s ease; box-shadow: 0 2px 5px rgba(0,0,0,0.02);
+}
+.fam-card:hover { border-color: #cfa84e; transform: translateY(-2px); box-shadow: 0 6px 15px rgba(207, 168, 78, 0.12); }
+
+.partner-wrapper { display: flex; justify-content: center; }
+.partner-card { border: 2px solid #cfa84e; background: #fffcf5; width: 280px; padding: 20px; }
+.partner-card .fam-name { font-size: 1.1rem; color: #1a2a3a; }
+
+.kids-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; }
+.fam-name { font-weight: 600; margin-bottom: 4px; }
+.card-year { color: #8b7355; font-size: 0.85rem; font-style: italic; }
+
+/* --- Tekst & Documenten --- */
+.bio-content { line-height: 1.8; background: #fff; padding: 30px; border: 1px solid #f0ede6; text-align: left; border-radius: 4px; }
+/* VERBETERDE SCANS LAYOUT */
+.scans-grid { 
+  display: grid; 
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
+  gap: 25px; 
+  margin-top: 30px;
+  justify-items: center;
+}
+
+.scan-wrapper { 
+  width: 100%;
+  max-width: 240px;
+  aspect-ratio: 3/4; 
+  background: white;
+  padding: 10px; /* De witte rand */
+  border: 1px solid #e0ddd5; 
+  border-radius: 2px; 
+  cursor: pointer; 
+  position: relative; 
+  box-shadow: 0 4px 15px rgba(0,0,0,0.08); /* Zachte schaduw */
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.scan-wrapper:hover {
+  transform: translateY(-5px) rotate(1deg); /* Speels effect bij hover */
+  box-shadow: 0 12px 25px rgba(0,0,0,0.15);
+  z-index: 10;
+}
+
+.scan-wrapper img { 
+  width: 100%; 
+  height: 100%; 
+  object-fit: cover; 
+  display: block;
+}
+
+.scan-overlay { 
+  position: absolute; 
+  inset: 10px; /* Blijft binnen de witte rand */
+  background: rgba(26,42,58,0.4); 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+  opacity: 0; 
+  transition: 0.3s; 
+}
+
+.scan-wrapper:hover .scan-overlay { 
+  opacity: 1; 
+}
+
+.scan-overlay span { 
+  color: white; 
+  border: 1px solid white; 
+  padding: 8px 16px; 
+  font-size: 0.8rem; 
+  border-radius: 4px; 
+  background: rgba(0,0,0,0.2);
+  backdrop-filter: blur(2px);
+}
+/* --- Lightbox --- */
+.lightbox-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 1000; display: flex; flex-direction: column; }
+.close-x { 
+  position: absolute; top: 25px; right: 35px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); 
+  color: white; font-size: 35px; width: 50px; height: 50px; border-radius: 50%; cursor: pointer; z-index: 1100;
+  display: flex; align-items: center; justify-content: center; transition: 0.2s;
+}
+.close-x:hover { background: rgba(255,255,255,0.2); transform: rotate(90deg); }
+
+.lightbox-canvas { flex: 1; overflow: auto; padding: 40px; text-align: center; }
+.img-fit { max-width: 98%; max-height: 85vh; object-fit: contain; cursor: zoom-in; display: inline-block; border-radius: 2px; }
+.img-full { width: 150%; max-width: none; max-height: none; cursor: zoom-out; display: inline-block; }
+.lightbox-footer { padding: 20px; display: flex; justify-content: center; gap: 15px; background: rgba(0,0,0,0.8); }
+.lightbox-footer button { padding: 10px 20px; border-radius: 4px; border: none; cursor: pointer; background: #fff; font-weight: 600; }
+
+/* --- Mobiel --- */
+@media (max-width: 768px) {
+  .layout-container { flex-direction: column; }
+  .sidebar { width: 100%; order: -1; padding: 20px; border-right: none; border-bottom: 1px solid #eee; }
+  .main-content { padding: 20px 15px; }
+  .vital-details { gap: 20px; flex-direction: column; align-items: center; }
+  .vital-item { min-width: auto; }
+}
+/* Zorg dat de datum en plaats onder elkaar komen te staan */
+.vital-item .date {
+  display: block; /* Forceert de datum op een eigen regel */
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: #1a2a3a;
+}
+
+.vital-item .place {
+  display: block; /* Forceert de plaats op een eigen regel onder de datum */
+  font-size: 0.95rem;
+  color: #1a2a3a;
+  margin-top: 2px; /* Geeft een klein beetje witruimte tussen datum en plaats */
+  font-weight: 400;
+}
+
+/* Zorg dat de hele kolom netjes gecentreerd blijft */
+.vital-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-width: 180px;
+}
 </style>
